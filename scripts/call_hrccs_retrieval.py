@@ -38,8 +38,8 @@ else:
     
     
 # Wavelength bounds for retrieval/data
-lammin = 0.5
-lammax = 1.0
+lammin = 0.7
+lammax = 0.8
 
 
 # Create default SMART model for reflected light spectroscopy
@@ -134,7 +134,8 @@ sim.set_run_in_place(place)
 theta_names = ["As", "Temp", "H2O", "CO2", "O2", "O3", "Vsys", "Kp"]
 # Define the forward model
 fx_highres = smarter.forward_models.FxReflect_HRCCS("isothermal",               # Type of TP profile
-                                      "strato",                   # Type of cloud 
+                                      #"strato",                   # Type of cloud 
+                                       "default", # Default cloud to default smart model
                                        theta_names=theta_names,
                                        smart    = sim,            # Default SMART model
                                        pmin     = 1e-2,           # Min pressure [Pa]
@@ -147,10 +148,10 @@ fx_highres = smarter.forward_models.FxReflect_HRCCS("isothermal",               
 
 # These are our paramaters and their initial values  
 As = np.log10(0.05)       # Surface albedo (log)
-Pt_cld = np.log10(0.6e5)  # Cloud top pressure (log Pa)
-dP_cld = np.log10(0.1e5)  # Cloud pressure thickness (log Pa)
-tau_cld = np.log10(13.0)  # Cloud optical depth (log)
-f_cld = 0.5               # Cloud fraction (linear)
+#Pt_cld = np.log10(0.6e5)  # Cloud top pressure (log Pa)
+#dP_cld = np.log10(0.1e5)  # Cloud pressure thickness (log Pa)
+#tau_cld = np.log10(13.0)  # Cloud optical depth (log)
+f_cld = 0.               # Cloud fraction (linear)
 h2o = np.log10(3e-3)      # H2O VMR (log)
 co2 = -4.0                # CO2 VMR (log)
 o2 = np.log10(0.21)       # O2 VMR (log)
@@ -161,10 +162,10 @@ Kp = 100.
 # These are the true values
 truths = [As, 
           T0, 
-          Pt_cld, 
-          dP_cld, 
-          tau_cld, 
-          f_cld, 
+          #Pt_cld, 
+          #dP_cld, 
+          #tau_cld, 
+          #f_cld, 
           h2o, 
           co2, 
           o2, 
@@ -183,10 +184,10 @@ priors = [
     UniformPrior(100.0, 400.0, theta_name="Temp"), 
     
     # Cloud parameters
-    UniformPrior(3.0, 7.0, theta_name = "Pt_cld"), 
-    UniformPrior(2.0, 7.0, theta_name = "dP_cld"), 
-    UniformPrior(-2.0, 2.0, theta_name = "tau_cld"), 
-    UniformPrior(0.0, 1.0, theta_name = "f_cld"), 
+    #UniformPrior(3.0, 7.0, theta_name = "Pt_cld"), 
+    #UniformPrior(2.0, 7.0, theta_name = "dP_cld"), 
+    #UniformPrior(-2.0, 2.0, theta_name = "tau_cld"), 
+    #UniformPrior(0.0, 1.0, theta_name = "f_cld"), 
     
     # Gas Abundances 
     UniformPrior(-12.0, 0.0, theta_name="H2O"),
@@ -223,21 +224,29 @@ scale_factor = (Rp / a)**2.0
 def generate_data(fx_highres):
     
     
-    Fp_total = f_cld * fx_highres.rad_cld.pflux + (1 - f_cld) * fx_highres.rad_clr.pflux
+    if f_cld == 0.:
+        Fp_total = fx_highres.rad.pflux
+    else:
+        Fp_total = f_cld * fx_highres.rad_cld.pflux + (1 - f_cld) * fx_highres.rad_clr.pflux
     
     # calculate total rv of planet at each frame
     RVplanet = Vsys + fx_highres.Vbary + Kp * np.sin(fx_highres.phi)
 
     # get spline coefficients for planet spectrum
-    cs_p = sp.interpolate.splrep(fx_highres.rad_clr.lam, Fp_total, s=0.0)  #spline coeffs for planet, also doing the Rp
+    if f_cld == 0.:
+        cs_p = sp.interpolate.splrep(fx_highres.rad.lam, Fp_total, s=0.0)  #spline coeffs for planet, also doing the Rp
+    else:
+        cs_p = sp.interpolate.splrep(fx_highres.rad_clr.lam, Fp_total, s=0.0)  #spline coeffs for planet, also doing the Rp
 
 
     # create series of forward models by Doppler shifting yhr to corresponding Vp of each frame
     Fp_shifted_arr = []
     
     for i in range(len(RVplanet)):
-        print("RV:", RVplanet[i])
-        lam_shifted = fx_highres.rad_clr.lam * (1.0 - RVplanet[i]*1e3/constants.c.value)
+        if f_cld == 0.:
+            lam_shifted = fx_highres.rad.lam * (1.0 - RVplanet[i]*1e3/constants.c.value)
+        else:
+            lam_shifted = fx_highres.rad_clr.lam * (1.0 - RVplanet[i]*1e3/constants.c.value)
         Fp = sp.interpolate.splev(lam_shifted, cs_p, der=0)
         
         Fp_shifted_arr.append(Fp)
@@ -250,7 +259,10 @@ def generate_data(fx_highres):
     
     
     Fp_downbinned = []
-    Fs_downbinned = cg.downbin_spec(fx_highres.rad_clr.sflux, xhr, data_wl, dlam = data_dwl)
+    if f_cld == 0.:
+        Fs_downbinned = cg.downbin_spec(fx_highres.rad.sflux, xhr, data_wl, dlam = data_dwl)
+    else:
+        Fs_downbinned = cg.downbin_spec(fx_highres.rad_clr.sflux, xhr, data_wl, dlam = data_dwl)
     # interpolate noised up data onto data lambda grid
     for i in range(len(RVplanet)):
         Fp_downbinned.append(cg.downbin_spec(Fp_shifted_arr[i], xhr, data_wl, dlam = data_dwl))
@@ -288,8 +300,28 @@ retrieval = smarter.Retrieval(tag = os.path.join(place, fx_highres.smart.tag),
                               instrument = smarter.instruments.NaiveDownbin(),
                               verbose = True)
 
-retrieval.call_minimize_hrccs(truths, options={"maxiter" : 100, "maxfev":100})
-#retrieval.call_many_minimize(N=None,theta0=truths, options={"maxiter" : 2})
+#retrieval.lnlike_hrccs(truths)
+method = str(sys.argv[1])
+start_time = time.time()
+if method == "minimize":
+    print("Using call_minimize_hrccs()")
+    retrieval.call_minimize_hrccs(truths)#, options={"maxiter" : 100, "maxfev":100})
+elif method == "minimize_parallel":
+    print("Using call_minimize_hrccs()")
+    retrieval.call_many_minimize_hrccs(N=None,theta0=truths)#, options={"maxiter" : 2})
+elif method == "emcee":
+    print("Using emcee")
+    def lnprob(theta): return retrieval.lnprob_hrccs(theta)
+    retrieval.call_mcmc(lnprob, nsteps = 100, nwalkers = 32, p0 = None,
+                        processes = None, cache = True, overwrite = False,
+                        nodes = 1, Pool = None)
+elif method == "dynesty":
+    print("Using dynesty")
+    retrieval.call_dynesty_hrccs(maxiter=100)
+else:
+    print("METHOD NOT SPECIFIED")
 
-
-
+print("------------")
+print("ELAPSED TIME")
+print(round(time.time() - start_time)/60/60, "hr")
+print("------------")
