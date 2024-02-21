@@ -17,6 +17,11 @@ from scipy.interpolate import interp1d
 import astropy.constants as constants
 import astropy.io
 
+sys.path.append("/gscratch/vsm/mcurr/PACKAGES/")
+import high_res_tools as hrt
+
+import pickle
+
 
 case = sys.argv[1]
 
@@ -27,6 +32,7 @@ if case == "fo2_01":
     fo3_forward = 7e-7
     fco2_forward = 0.1
     P0 = 1.013 * 1e5    # Surface pressure
+    spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_01percent_5000_20000cm_toa.rad"
 elif case == "fo2_05":
     fo2_forward = 0.05
     fch4_forward = 1e-3
@@ -34,6 +40,7 @@ elif case == "fo2_05":
     fo3_forward = 7e-7
     fco2_forward = 0.1
     P0 = 1.013 * 1e5    # Surface pressure
+    spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_05percent_5000_20000cm_toa.rad"
 elif case == "fo2_21" or case == "fo2_21_noiseless":
     fo2_forward = 0.21
     fch4_forward = 1e-3
@@ -41,6 +48,7 @@ elif case == "fo2_21" or case == "fo2_21_noiseless":
     fo3_forward = 7e-7
     fco2_forward = 0.1
     P0 = 1.013 * 1e5    # Surface pressure
+    spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_21percent_5000_20000cm_toa.rad"
 elif case == "fo2_50":
     fo2_forward = 0.50
     fch4_forward = 1e-3
@@ -48,6 +56,7 @@ elif case == "fo2_50":
     fo3_forward = 7e-7
     fco2_forward = 0.1
     P0 = 1.013 * 1e5    # Surface pressure
+    spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_50percent_5000_20000cm_toa.rad"
 elif case == "o2_10bar":
     fo2_forward = 0.95
     fch4_forward = 1e-12
@@ -55,6 +64,7 @@ elif case == "o2_10bar":
     fo3_forward = 7e-7
     fco2_forward = 5e-3
     P0 = 9.60200e5    # Surface pressure
+    spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_10bar_5000_20000cm_toa.rad"
 else:
     assert False, "Case not found/specified"
     
@@ -76,99 +86,112 @@ if not os.path.exists(place):
 else:
     print("Dir already exists: %s" %place)
 
-def make_data(spec_fl, lammin, lammax, 
-              phases, radstar, dist, r_AU, tele_diam,
-              RV_sys, RV_bary, Kp,
-              throughput=0.1,seed=None):
+def make_data_spectr(seed=None, noise_switch=1., plotting=True, aspect=1000):
     
     ##################################
     ############ STEP 1 ##############
     ##################################
     
-    # read smart file to make data
-    prxcn_rad = smart.readsmart.Rad(spec_fl)
+    system_metadata = pickle.load(open("/gscratch/vsm/mcurr/PROJECTS/terrestrial_HRCCS/metadata/high_res_earths_metadata.p", "rb"))
 
-    # reverse order to ascending lambda
-    sflux = prxcn_rad.sflux[::-1]
-    pflux = prxcn_rad.pflux[::-1]
-    lam = prxcn_rad.lam[::-1]
 
-    # cut to lammin, lammax size
-    m = (lam > lammin) & (lam < lammax)
-    sflux = sflux[m]
-    pflux = pflux[m]
-    lam = lam[m]
+    instrument_res = 1e5
 
-    # define planet albedo
-    Ahr = pflux/sflux
+    star = "prxcn"
+    env = "pie"
+    star_env_tag = star + "_" + env
+    molecule = "full"
+    band = "full"
+    obs_type = "refl"
+    add_clouds = False
+    contrast = 1e-5
 
-    # calculate exposure time per phase
+    incl = 60. # deg
+
+    P_rot_star = np.nan
+
+    R_star = system_metadata[star_env_tag]["stel_rad"] # solar radii
+    P_rot_star = 82.6 # [day] from https://arxiv.org/pdf/1608.07834.pdf
+    P_orb = system_metadata[star_env_tag]["P_s"] # s
+    R_plan = system_metadata[star_env_tag]["plan_rad"]  # earth radii
+    P_rot_plan = P_orb # synchronous rotator
+
+    a_p = system_metadata[star_env_tag]["a_AU"] # AU
+    M_s = system_metadata[star_env_tag]["star_mass"]  # solar mass
+    M_p = 1 # earth mass
+
+    tele_area = 978 # m^2
+    tele_diam = 2*np.sqrt(tele_area / np.pi) * unit.m
+
+
+
+
+    observation = hrt.pipeline.SimulateObservation(star, env, molecule, band, obs_type,
+                                                   add_clouds=add_clouds, instrument_R=instrument_res, 
+                                                   coronagraph_contrast=contrast, 
+                                                   skycalc_path = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/sky", 
+                                                   inst_broaden=False, verbose=True)
+    observation.get_wl_bounds()
+
+    observation.lam = lam
+    observation.fstar = sflux
+    observation.fplan = pflux
+    observation.fplan_no_mol = np.nan * np.ones_like(pflux)
+
+    # simulate initial observation
+    observation.run(incl,
+                    radstar,
+                    P_rot_star,
+                    P_orb, R_plan,
+                    P_rot_plan,
+                    a_p,
+                    M_s,
+                    M_p,
+                    0,
+                    0,
+                    1.,
+                    [0. * unit.deg],
+                    dist,
+                    tele_diam.value)
+    
+    
+    cplan = observation.signal_matrix_no_T[0, 0]
+    cspeck = observation.signal_only_speckle_no_T[0, 0]
+    cstar = observation.signal_only_star_no_T[0, 0]
+    wl = observation.instrument_lam[0]
+
+
+    Kp = observation.K_p.value
+    #Kp = 100
+
+    
+
+    texp_total = 1000 * 60 * 60 
+    texp_total = 10 * 20 * 8 * 60 * 60 # 10 years of data
+    print(texp_total)
+    #texp_total = 1e9
+
     texp_per_phase = texp_total / len(phases)
 
-
-    # Define ELT-like Telescope
-    telescope = cg.Telescope(lammin = np.min(lam),    # Wavelength minimum
-                             lammax = np.max(lam),    # Wavelength maximum
-                             R = 100000,            # Spectral resolution
-                             Tput = throughput,        # Throughput
-                             D = tele_diam,           # Telescope mirror diameter [m]
-                             Tsys = 275.0,       # Telescope mirror temperature [K]
-                             C = 1e-5,
-                             IWA=0.
-                             # DEFINE OTHER PARAMS
-                            )
-
-
-    star = cg.Star(Teff = 2992.,               # Stellar effective temperature [K]
-                   Rs = radstar)                   # Stellar radius [solar radii]     
-
-
-    planet = cg.Planet(name="PCb",
-                       d = dist,                 # Distance [pc]
-                       a = r_AU,                  # Semi-major axis [AU]
-                       alpha = 0. 
-                      )
-
-    # Use coronagraph model to create spectrum
-    cn = cg.CoronagraphNoise(telescope=telescope,
-                             planet=planet,
-                             star=star,
-                             texp = texp_per_phase, # hr
-                            )
-
-    cn.run_count_rates(Ahr, lam, sflux)
-
-
-    # get tellurics
-    # set telluric resolution to be retrieved
-    
-    tellurics_fits = astropy.io.fits.open("../sky/skycalc_500_2000nm.fits")
-    
-    tel_lam = tellurics_fits[1].data["LAM"] 
-    tel_trans = tellurics_fits[1].data["TRANS"]
-    tel_flux = tellurics_fits[1].data["FLUX"]
-    
-    omega_sky = np.pi*(tel_lam*1e-6/tele_diam*180.*3600./np.pi)**2. # arcsec2
-            
-    sky_background = tel_flux * omega_sky # units are photons/s/m2/um
-    
-    cthe_hr = sky_background * np.pi * (tele_diam/2)**2 * throughput # units are photons/s/um 
-
+    cp = cplan * texp_per_phase
+    csp = cspeck * texp_per_phase
 
     # interpolate tellurics onto data wl grid
     f_trans = interp1d(tel_lam, tel_trans, fill_value="extrapolate")
-    tellurics = f_trans(cn.lam[:-1])
+    tellurics = f_trans(wl)
     #tellurics = np.ones_like(tellurics)
 
-    f_tflux = interp1d(tel_lam, cthe_hr, fill_value="extrapolate")
-    cthe = f_tflux(cn.lam)
-
-
-    wl = cn.lam[:-1]
-    cp = cn.cp[:-1] * texp_per_phase
-    csp = cn.csp[:-1] * texp_per_phase
-
-    step1_arr = cp
+    #f_tflux = interp1d(tel_lam, cthe_hr, fill_value="extrapolate")
+    #cthe = f_tflux(wl)
+    
+    step1_matrix = cp
+    
+    if plotting:
+        plt.figure()
+        plt.plot(wl, cp)
+        plt.xlabel("wl [um]")
+        plt.ylabel("photons")
+        plt.title("Step 1: instantiate spectrum")
     
     
     ##################################
@@ -179,8 +202,11 @@ def make_data(spec_fl, lammin, lammax,
     cs_speck = sp.interpolate.splrep(wl, csp, s=0.0)
 
 
+
+
     signal_arr = []
     speck_arr = []
+    static_speck_arr = []
     for phase in phases:
 
         RVplanet = RV_sys + RV_bary + Kp * np.sin((phase*unit.deg).to(unit.rad))
@@ -192,35 +218,77 @@ def make_data(spec_fl, lammin, lammax,
 
         signal_arr.append(signal_shifted)
         speck_arr.append(speck_shifted)
-
+        static_speck_arr.append(csp)
     signal_arr = np.array(signal_arr)
     speck_arr = np.array(speck_arr)
-
+    static_speck_arr = np.array(static_speck_arr)
 
     buffer = 100
 
     signal_arr = signal_arr[:, buffer:-buffer]
     speck_arr = speck_arr[:, buffer:-buffer]
+    static_speck_arr = static_speck_arr[:, buffer:-buffer]
     wl_arr = wl[buffer:-buffer]
 
     step2_matrix = signal_arr
+    
+    if plotting:
+        plt.figure()
+        plt.imshow(step2_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 2: Doppler shift")
+        
+        plt.figure()
+        asdf = (wl_arr > 0.755) & (wl_arr < 0.775)
+        plt.plot(wl_arr[asdf], step2_matrix[0][asdf])
+        plt.plot(wl_arr[asdf], step2_matrix[-1][asdf])
+        plt.title("Step 2: Doppler shift")
+
     
     ##################################
     ############ STEP 3 ##############
     ##################################
     
     step3_matrix = step2_matrix * tellurics[buffer:-buffer]
-
+    
+    if plotting:
+        plt.figure()
+        plt.imshow(step3_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 3: Add tellurics")
+        
     
     ##################################
     ############ STEP 4 ##############
     ##################################
     
     np.random.seed(seed)
-    noise = np.random.randn(step3_matrix.shape[0], step3_matrix.shape[1]) * np.sqrt(step2_matrix * tellurics[buffer:-buffer] + speck_arr * tellurics[buffer:-buffer])
-
-    step4_matrix = step2_matrix * tellurics[buffer:-buffer] + noise_switch * noise
-
+    noise_arr = step2_matrix * tellurics[buffer:-buffer] + static_speck_arr * tellurics[buffer:-buffer]
+    noise = np.random.randn(step3_matrix.shape[0], step3_matrix.shape[1]) * np.sqrt(noise_arr)
+    
+    
+    step4_matrix = step2_matrix * tellurics[buffer:-buffer] + noise_switch*noise
+    
+#     plt.figure()
+#     plt.plot(wl_arr, noise_arr[0])
+#     print("SNR:", np.nansum(step2_matrix * tellurics[buffer:-buffer]) / np.sqrt(np.nansum(noise_arr)))
+#     print(noise_arr)
+#     print(np.nansum(step2_matrix * tellurics[buffer:-buffer]))
+#     print(np.nansum(noise_arr))
+#     assert False
+    
+    if plotting:
+        plt.figure()
+        plt.imshow(step4_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 4: Add noise")
+        
+    
+    # step 4.5: divide out stellar spectrum
+#     step4_matrix /= speck_arr
+    #plt.figure()
+    #plt.plot(wl_arr, step4pt5_matrix[0])
+    #assert False
     
     ##################################
     ############ STEP 5 ##############
@@ -233,7 +301,12 @@ def make_data(spec_fl, lammin, lammax,
         largest_vals = np.sort(spec)[::-1][:300]
         med_largest_vals = np.median(largest_vals)
         step5_matrix[i] = spec / med_largest_vals
-
+        
+    if plotting:
+        plt.figure()
+        plt.imshow(step5_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 5: Normalize spectra")
     
     ##################################
     ############ STEP 6 ##############
@@ -252,7 +325,12 @@ def make_data(spec_fl, lammin, lammax,
         spec_new = spec / fit 
 
         step6_matrix[i] = spec_new
-
+        
+    if plotting:
+        plt.figure()
+        plt.imshow(step6_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 6: Divide out tellurics")
     
     ##################################
     ############ STEP 7 ##############
@@ -271,6 +349,12 @@ def make_data(spec_fl, lammin, lammax,
 
 
         step7_matrix[:, j] = col_new
+        
+    if plotting:
+        plt.figure()
+        plt.imshow(step7_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 7: Divide out columnar variations")
     
     ##################################
     ############ STEP 8 ##############
@@ -278,14 +362,15 @@ def make_data(spec_fl, lammin, lammax,
     
     step8_matrix = np.empty_like(step7_matrix)
 
-    std_matrix = np.std(step7_matrix)
+    std_matrix = np.nanstd(step7_matrix)
 
     counter = 0
     for j in range(len(avg_spec)):
         col = step7_matrix[:, j]
 
         #print(std_matrix, np.std(col))
-        if np.std(col) > 3*std_matrix:
+        if np.max(np.abs(col)) > 3*std_matrix:
+        #if np.std(col) > 3*std_matrix:
             new_col = np.nan*np.ones_like(col)
             counter += 1
         else:
@@ -293,40 +378,75 @@ def make_data(spec_fl, lammin, lammax,
 
         step8_matrix[:, j] = new_col
         
+    if plotting:
+        plt.figure()
+        plt.imshow(step8_matrix, aspect=aspect)
+        plt.colorbar()
+        plt.title("Step 8: Mask noisy columns")
+        print(std_matrix)
+        
+        print(np.sum(np.isnan(step8_matrix[0])), "/",  len(step8_matrix[0]), "columns are NaN")
         
     data_for_retrieval = np.copy(step8_matrix)
     lam_for_retrieval = np.copy(wl_arr)
     
-    return lam_for_retrieval, data_for_retrieval
+    return lam_for_retrieval, data_for_retrieval, Kp
 
 
-spec_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_21percent_5000_20000cm_toa.rad"
-phases = np.arange(30, 61, 1.)
 
-texp_total = 1000 * 60 * 60 
+seed = 1
 
+# prox cen specific params
+
+sol_fl = "../data/hazmat_prxcn_xhires.txt"
+sol_skip = 0
 radstar = 0.1542
 r_AU = 0.04060742579931119
 dist = 1.3 # pc
 
-lammin = 0.5
-lammax = 2.0
-
 RV_sys = -22.
 RV_bary = 0.
-Kp = 49.07319034574975 # assumes a 60 deg inclination
-#Kp = 100
-tele_diam = 39.
-throughput = 0.1
 
-seed = 55
+lammin = 0.5
+lammax = 2.
+
+
+prxcn_rad_fl = "/gscratch/vsm/mcurr/PROJECTS/retrieval_HDC/o2_experiment/spectra/smart_io/prxcn_21percent_5000_20000cm_toa.rad"
+
+prxcn_rad = smart.readsmart.Rad(prxcn_rad_fl)
+
+sflux = prxcn_rad.sflux[::-1]
+pflux = prxcn_rad.pflux[::-1]
+lam = prxcn_rad.lam[::-1]
+
+m = (lam > lammin) & (lam < lammax)
+sflux = sflux[m]
+pflux = pflux[m]
+lam = lam[m]
+
+
+phases = np.arange(30, 61, 1.)
+
+
+# get tellurics
+# set telluric resolution to be retrieved
+
+tellurics_fits = astropy.io.fits.open("../sky/skycalc_500_2000nm.fits")
+
+tel_lam = tellurics_fits[1].data["LAM"] 
+tel_trans = tellurics_fits[1].data["TRANS"]
+tel_flux = tellurics_fits[1].data["FLUX"]
+
+#omega_sky = np.pi*(tel_lam*1e-6/tele_diam*180.*3600./np.pi)**2. # arcsec2
+        
+#sky_background = tel_flux * omega_sky # units are photons/s/m2/um
+
+#cthe_hr = sky_background * np.pi * (tele_diam/2)**2 * throughput # units are photons/s/um 
+
+
 
 # get data
-lam_for_retrieval, data_for_retrieval  = make_data(spec_fl, lammin, lammax, 
-                                                   phases, radstar, dist, r_AU,
-                                                   tele_diam, RV_sys, RV_bary, Kp, seed=seed)
-
-
+lam_for_retrieval, data_for_retrieval, Kp  = make_data_spectr(seed=seed, plotting=False, noise_switch=noise_switch)
 
 # set up a data object for retrieval
 data_hrccs = smarter.Data(x = lam_for_retrieval, 
@@ -455,8 +575,6 @@ co2 = np.log10(fco2_forward)                # CO2 VMR (log)
 o2 = np.log10(fo2_forward)       # O2 VMR (log)
 o3 = np.log10(fo3_forward)       # O3 VMR (log)
 ch4 = np.log10(fch4_forward)
-#Vsys = 0.
-#Kp = 49.07319034574975 # km/s
 
 # These are the true values
 truths = [As, 
@@ -513,7 +631,6 @@ fx_highres.theta_names = smarter.priors.get_theta_names(priors)
 # Run the forward model
 xhr, yhr = fx_highres.evaluate(truths)
 
-
 retrieval = smarter.Retrieval(tag = os.path.join(place, fx_highres.smart.tag),
                               data = data_hrccs,
                               priors = priors,
@@ -521,7 +638,87 @@ retrieval = smarter.Retrieval(tag = os.path.join(place, fx_highres.smart.tag),
                               instrument = smarter.instruments.NaiveDownbin(),
                               verbose = True)
 
-retrieval.call_dynesty_hrccs(processes=40)
+try:
+    testing_switch = sys.argv[2]
+except IndexError:
+    testing_switch = "off"
+
+if testing_switch == "testing":
+
+    # calculate scale factor for Fp/Fs calculation at the end:
+    # Get planet radius and semi major axis in units of km
+    Rp = retrieval.forward.sim.smartin.radius      # Already in km for SMART
+    a = retrieval.forward.sim.smartin.r_AU * unit.AU.in_units(unit.km)
+
+    # Compute Fp/Fs
+    # Note: stellar flux is at TOA, so must use semi-major axis to scale flux
+    scale_factor = (Rp / a)**2.0
+
+    def lnlike_test(retrieval, xhr, yhr):
+        # For each frame, compute high res log likelihood function
+        # according to Brogi and Line 2019
+        ymod_arr = []
+        ll = 0.
+        for i in range(len(retrieval.forward.phi)):
+            # bin to instrument grid
+            dx = retrieval.data.x[1:] - retrieval.data.x[:-1]
+            dx = np.hstack([dx, dx[-1]])
+            ymod = cg.downbin_spec(yhr[i], xhr, retrieval.data.x, dlam = dx)
+            ymod_arr.append(ymod)
+
+            # subtract mean
+            ymod -= np.nanmean(ymod)
+            ydat = retrieval.data.y[i] - np.nanmean(retrieval.data.y[i])
+
+            # evaluate likelihood
+            N = len(ymod)
+            s_f2 = 1/N * np.nansum(ydat * ydat) # data variance
+            s_g2 = 1/N * np.nansum(ymod * ymod) # model variance
+
+            ccv = 1/N * np.nansum(ydat * ymod) # cross covariance
+            ll_frame = -N/2 * np.log(s_f2 + s_g2 - 2*ccv) # from Brogi & Line 2019
+
+            ll += ll_frame
+        return ll#, ymod_arr
+
+    arr_sz = 11
+    arr_rng = 20
+
+    Kp_arr = np.linspace(Kp-arr_rng, Kp+arr_rng, arr_sz)#[2:3]
+    Vsys_arr = np.linspace(RV_sys-arr_rng, RV_sys+arr_rng, arr_sz)#[2:3]
+    counter = 0
+    RV_grid_test = np.empty((len(Kp_arr), len(Vsys_arr)))
+    state_arrs = []
+
+    for i, Kp_test in enumerate(Kp_arr):
+
+        for j, Vsys_test in enumerate(Vsys_arr):
+            state_arr = [As,
+                          T0,
+                          #Pt_cld,
+                          #dP_cld,
+                          #tau_cld,
+                          #f_cld,
+                          h2o,
+                          co2,
+                          o2,
+                          o3,
+                          ch4,
+                          Vsys_test,
+                          Kp_test
+                        ]
+            yhr_arr = retrieval.forward.gen_shifted_frames(retrieval.forward.rad.lam, retrieval.forward.rad.pflux/retrieval.forward.rad.sflux, state_arr)
 
 
+
+            yhr_arr *= scale_factor
+
+            ll = lnlike_test(retrieval, xhr, yhr_arr)
+            RV_grid_test[i, j] = ll
+            counter += 1
+            if counter % 100 == 0:
+                print(counter, "/", arr_sz**2)
+    print(RV_grid_test)
+else:
+    retrieval.call_dynesty_hrccs(processes=40, dlogz=0.01)
 
